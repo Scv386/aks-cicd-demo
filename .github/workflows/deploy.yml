@@ -1,0 +1,58 @@
+name: CI/CD to AKS
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  REGISTRY_NAME: ${{ secrets.REGISTRY_NAME }}
+  REGISTRY: ${{ secrets.REGISTRY_NAME }}.azurecr.io
+  IMAGE_NAME: ${{ secrets.IMAGE_NAME }}
+  K8S_NAMESPACE: demo
+  DEPLOYMENT_NAME: demo-app
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: ACR login
+        run: az acr login --name $REGISTRY_NAME
+
+      - name: Build and Push image
+        run: |
+          docker build -t $REGISTRY/$IMAGE_NAME:${{ github.run_number }} .
+          docker push $REGISTRY/$IMAGE_NAME:${{ github.run_number }}
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Apply manifests (first-time safe)
+        run: |
+          sed -i "s#REPLACE_ME_REGISTRY#$REGISTRY#g" k8s/deployment.yaml
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+
+      - name: Update image to the new tag
+        run: |
+          kubectl -n $K8S_NAMESPACE set image deployment/$DEPLOYMENT_NAME \
+            $DEPLOYMENT_NAME=$REGISTRY/$IMAGE_NAME:${{ github.run_number }}
+
+      - name: Wait for rollout
+        run: kubectl -n $K8S_NAMESPACE rollout status deployment/$DEPLOYMENT_NAME
